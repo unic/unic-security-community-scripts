@@ -46,7 +46,6 @@ This repo contains two scanner scripts that walk every Node.js project under `$H
 ### macOS / Linux
 
 ```bash
-chmod +x axios-scan.sh
 ./axios-scan.sh
 ```
 
@@ -58,6 +57,12 @@ Requires: `bash`, `npm`, `jq` (optional but recommended for `overrides` injectio
 # Run as Administrator for automatic firewall blocking
 pwsh -ExecutionPolicy Bypass -File .\axios-scan.ps1
 ```
+
+### Dependencies
+
+1. `jq`:
+   1. Macos: Install via `brew install jq`
+   2. Windows: Install via `winget install --id=jqlang.jq -e`
 
 ### What the scripts do
 
