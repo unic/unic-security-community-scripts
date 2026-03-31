@@ -49,7 +49,7 @@ This repo contains two scanner scripts that walk every Node.js project under `$H
 ./axios-scan.sh
 ```
 
-Requires: `bash`, `npm`, `jq` (optional but recommended for `overrides` injection).
+Requires: `bash`, `npm`, `jq` (optional but strongly recommended — without it, declared-version detection for projects without `node_modules` falls back to regex parsing which may miss non-standard dependency fields, and `overrides` auto-injection is disabled entirely).
 
 ### Windows (PowerShell)
 
@@ -61,7 +61,7 @@ pwsh -ExecutionPolicy Bypass -File .\axios-scan.ps1
 ### Dependencies
 
 1. `jq`:
-   1. Macos: Install via `brew install jq`
+   1. macOS: Install via `brew install jq`
    2. Windows: Install via `winget install --id=jqlang.jq -e`
 
 ### What the scripts do
@@ -71,7 +71,7 @@ pwsh -ExecutionPolicy Bypass -File .\axios-scan.ps1
 3. Recursively find all `package.json` files under `$HOME` (excluding `node_modules`)
 4. For each project: detect affected axios via `npm list` and/or direct `node_modules` inspection
 5. Check for `plain-crypto-js` in `node_modules`
-6. For each affected project: print mitigation steps, inject `overrides.axios` into `package.json`, and auto-block the C2 IP (Windows, requires Administrator)
+6. For each affected project: print mitigation steps and inject `overrides.axios` into `package.json` (requires `jq`); on Windows only (PowerShell script, requires Administrator): auto-block the C2 IP via Windows Firewall
 
 ## Manual remediation
 
