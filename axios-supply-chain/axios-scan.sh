@@ -23,9 +23,9 @@ FOUND_RAT=0
 echo -e "${CYAN}${BOLD}"
 echo "╔══════════════════════════════════════════════════════╗"
 echo "║     axios Supply-Chain Attack Scanner (2026-03-30)   ║"
-echo "║     Scanning: ${SCAN_ROOT}                           ║"
 echo "╚══════════════════════════════════════════════════════╝"
-echo -e "${RESET}"
+echo -e "    Scanning: ${SCAN_ROOT}${RESET}"
+echo ""
 
 # ─── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -58,7 +58,7 @@ detect_package_manager() {
 
 inject_overrides() {
 	local pkg_file="$1"
-	local branch="$2"    # "1.x" or "0.x"
+	local branch="$2"    # "0.x" → safe version 0.30.3; any other value defaults to 1.14.0
 	local safe_version
 	safe_version=$( [[ "$branch" == "0.x" ]] && echo "0.30.3" || echo "1.14.0" )
 
@@ -70,14 +70,26 @@ inject_overrides() {
 
 	# Check if overrides.axios is already set correctly
 	local existing
-	existing=$(jq -r '.overrides.axios // ""' "${pkg_file}" 2>/dev/null || true)
+	if ! existing=$(jq -r '.overrides.axios // ""' "${pkg_file}" 2>&1); then
+		echo -e "  ${RED}[!] Cannot parse ${pkg_file} (jq error: ${existing}) — skipping override injection.${RESET}" >&2
+		return 1
+	fi
 	if [[ "$existing" == "$safe_version" ]]; then
 		echo -e "  ${GREEN}[i] overrides.axios already set to ${safe_version} in ${pkg_file}${RESET}"
 		return
 	fi
 
 	local tmp_file="${pkg_file}.tmp"
-	jq --arg v "${safe_version}" '.overrides.axios = $v' "${pkg_file}" > "${tmp_file}" && mv "${tmp_file}" "${pkg_file}"
+	# Write to a temp file first so the original is not truncated if jq fails mid-run
+	trap 'rm -f "${tmp_file}"' RETURN
+	if ! jq --arg v "${safe_version}" '.overrides.axios = $v' "${pkg_file}" > "${tmp_file}"; then
+		echo -e "  ${RED}[!] jq failed writing to ${tmp_file} — ${pkg_file} NOT modified.${RESET}" >&2
+		return 1
+	fi
+	if ! mv "${tmp_file}" "${pkg_file}"; then
+		echo -e "  ${RED}[!] Failed to rename temp file — original intact. Temp file left at ${tmp_file}.${RESET}" >&2
+		return 1
+	fi
 	echo -e "  ${GREEN}[+] Injected overrides.axios = \"${safe_version}\" into ${pkg_file}${RESET}"
 }
 
@@ -110,10 +122,6 @@ print_credential_rotation_warning() {
 
 echo -e "${CYAN}[*] Dependency check:${RESET}"
 
-HAS_NPM=0
-HAS_JQ=0
-HAS_NET=0
-
 if command -v pnpm &>/dev/null; then
 	echo -e "    ${GREEN}pnpm    ✓ found${RESET}"
 fi
@@ -122,7 +130,6 @@ if command -v yarn &>/dev/null; then
 fi
 if command -v npm &>/dev/null; then
 	echo -e "    ${GREEN}npm     ✓ found${RESET}"
-	HAS_NPM=1
 else
 	echo -e "    ${YELLOW}npm     ✗ missing — falling back to node_modules/axios/package.json inspection${RESET}"
 	echo -e "             (transitive/hoisted installs may be missed)"
@@ -133,7 +140,6 @@ fi
 
 if command -v jq &>/dev/null; then
 	echo -e "    ${GREEN}jq      ✓ found — overrides injection will preserve package.json exactly${RESET}"
-	HAS_JQ=1
 else
 	echo -e "    ${YELLOW}jq      ✗ missing — overrides injection disabled; mitigation steps will be printed instead${RESET}"
 	echo -e "             (install jq: https://jqlang.org/download/)"
@@ -141,7 +147,6 @@ fi
 
 if command -v ss &>/dev/null || command -v netstat &>/dev/null; then
 	echo -e "    ${GREEN}ss/netstat ✓ found — C2 connection check active${RESET}"
-	HAS_NET=1
 else
 	echo -e "    ${YELLOW}ss/netstat ✗ missing — skipping live C2 connection check${RESET}"
 fi
@@ -150,14 +155,14 @@ echo ""
 
 # ─── 1. Check active C2 connections ───────────────────────────────────────────
 
-echo -e "${CYAN}[*] Checking for active C2 connections to ${C2_DOMAIN} / ${C2_IP}...${RESET}"
+echo -e "${CYAN}[*] Checking for active C2 connections to ${C2_IP} (IP only — domain ${C2_DOMAIN} is not resolved in socket output)...${RESET}"
 if command -v ss &>/dev/null; then
-	if ss -tn 2>/dev/null | grep -qE "${C2_IP}"; then
+	if ss -tn 2>/dev/null | grep -qF "${C2_IP}"; then
 		echo -e "${RED}[!!!] LIVE C2 CONNECTION DETECTED — system is actively compromised!${RESET}"
 		FOUND_RAT=1
 	fi
 elif command -v netstat &>/dev/null; then
-	if netstat -an 2>/dev/null | grep -qE "${C2_IP}"; then
+	if netstat -an 2>/dev/null | grep -qF "${C2_IP}"; then
 		echo -e "${RED}[!!!] LIVE C2 CONNECTION DETECTED — system is actively compromised!${RESET}"
 		FOUND_RAT=1
 	fi
@@ -167,7 +172,7 @@ fi
 
 if [[ "$(uname -s)" == "Linux" ]]; then
 	echo -e "${CYAN}[*] Checking for Linux RAT artifact /tmp/ld.py...${RESET}"
-	if ls -la /tmp/ld.py 2>/dev/null; then
+	if [[ -f /tmp/ld.py ]]; then
 		echo -e "${RED}[!!!] COMPROMISED — /tmp/ld.py found. This is a known RAT dropper artifact.${RESET}"
 		FOUND_RAT=1
 	else
@@ -181,6 +186,7 @@ echo ""
 echo -e "${CYAN}[*] Scanning ${SCAN_ROOT} for Node.js projects...${RESET}"
 
 PACKAGE_FILES=()
+_find_errors=$(mktemp)
 while IFS= read -r _pkg; do
 	PACKAGE_FILES+=("$_pkg")
 done < <(
@@ -189,8 +195,13 @@ done < <(
 		-not -path "*/node_modules/*" \
 		-not -path "*/.git/*" \
 		-not -path "*/.cache/*" \
-		2>/dev/null
+		2>"${_find_errors}"
 )
+_skipped=$(grep -c . "${_find_errors}" 2>/dev/null || echo 0)
+rm -f "${_find_errors}"
+if [[ "${_skipped}" -gt 0 ]]; then
+	echo -e "${YELLOW}[!] ${_skipped} director(ies) could not be scanned (permission denied). Run as root for full coverage.${RESET}"
+fi
 
 echo -e "${CYAN}[*] Found ${#PACKAGE_FILES[@]} project package.json file(s). Inspecting...${RESET}"
 echo ""
@@ -199,6 +210,10 @@ for pkg_file in "${PACKAGE_FILES[@]}"; do
 	project_dir="$(dirname "${pkg_file}")"
 
 	# ── Detect installed axios version via package manager list ──────────────
+	if [[ ! -d "${project_dir}" ]]; then
+		echo -e "  ${YELLOW}[!] Skipping ${project_dir} — directory not accessible.${RESET}" >&2
+		continue
+	fi
 	pkg_manager="$(detect_package_manager "${project_dir}")"
 	installed_version=""
 	if command -v "${pkg_manager}" &>/dev/null && [[ -d "${project_dir}/node_modules" ]]; then
@@ -237,7 +252,7 @@ for pkg_file in "${PACKAGE_FILES[@]}"; do
 		if command -v jq &>/dev/null; then
 			declared_version=$(jq -r '
 				(.dependencies["axios"] // .devDependencies["axios"] // "") |
-				ltrimstr("^") | ltrimstr("~") | ltrimstr(">=") | ltrimstr("=")
+				ltrimstr("^") | ltrimstr("~") | ltrimstr(">=") | ltrimstr("<=") | ltrimstr(">") | ltrimstr("<") | ltrimstr("=")
 			' "${pkg_file}" 2>/dev/null || true)
 		else
 			declared_version=$(grep -E '"axios"[[:space:]]*:' "${pkg_file}" 2>/dev/null \

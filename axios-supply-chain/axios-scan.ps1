@@ -8,7 +8,6 @@
 #Requires -Version 5.1
 
 Set-StrictMode -Version Latest
-$ErrorActionPreference = 'SilentlyContinue'
 
 $AffectedAxiosVersions = @('1.14.1', '0.30.4')
 $C2IP                  = '142.11.206.73'
@@ -24,8 +23,8 @@ function Write-Banner {
 	Write-Host ""
 	Write-Host "╔══════════════════════════════════════════════════════╗" -ForegroundColor Cyan
 	Write-Host "║   axios Supply-Chain Attack Scanner (2026-03-30)     ║" -ForegroundColor Cyan
-	Write-Host "║   Scanning: $ScanRoot                                ║" -ForegroundColor Cyan
 	Write-Host "╚══════════════════════════════════════════════════════╝" -ForegroundColor Cyan
+	Write-Host "    Scanning: $ScanRoot" -ForegroundColor Cyan
 	Write-Host ""
 }
 
@@ -88,7 +87,10 @@ function Get-PackageVersion {
 	if (-not (Test-Path $PackageJsonPath)) { return $null }
 	try {
 		return (Get-Content $PackageJsonPath -Raw | ConvertFrom-Json).version
-	} catch { return $null }
+	} catch {
+		Write-Warning "Get-PackageVersion: failed to read $PackageJsonPath — $_"
+		return $null
+	}
 }
 
 function Get-DeclaredAxiosVersion {
@@ -98,8 +100,10 @@ function Get-DeclaredAxiosVersion {
 		$v = if ($pkg.dependencies.axios) { $pkg.dependencies.axios }
 			 elseif ($pkg.devDependencies.axios) { $pkg.devDependencies.axios }
 			 else { $null }
-		if ($v) { return $v -replace '^[\^~>=]+', '' }
-	} catch {}
+		if ($v) { return $v -replace '^[\^~><=]+', '' }
+	} catch {
+		Write-Warning "Get-DeclaredAxiosVersion: failed to parse $PackageJsonPath — $_"
+	}
 	return $null
 }
 
@@ -109,56 +113,56 @@ function Invoke-PmList {
 	if (-not (Test-Path (Join-Path $ProjectDir "node_modules"))) { return $null }
 	try {
 		$output = switch ($PackageManager) {
-			"pnpm" { & pnpm list axios --dir $ProjectDir 2>$null }
-			"yarn" { & yarn --cwd $ProjectDir list --pattern axios 2>$null }
-			default { & npm list axios --prefix $ProjectDir 2>$null }
+			"pnpm" { & pnpm list axios --dir $ProjectDir 2>&1 }
+			"yarn" { & yarn --cwd $ProjectDir list --pattern axios 2>&1 }
+			default { & npm list axios --prefix $ProjectDir 2>&1 }
 		}
 		$match = $output | Select-String -Pattern '(\d+\.\d+\.\d+)' | Select-Object -First 1
 		if ($match -match '(\d+\.\d+\.\d+)') { return $Matches[1] }
-	} catch {}
+	} catch {
+		Write-Warning "Invoke-PmList: $PackageManager failed in $ProjectDir — $_"
+		return $null
+	}
 	return $null
 }
 
 function Set-AxiosOverride {
 	param([string]$PackageJsonPath, [string]$SafeVersion)
 
-	# Check if overrides.axios is already set correctly
 	try {
-		$existing = (Get-Content $PackageJsonPath -Raw | ConvertFrom-Json).overrides.axios
+		$existing = (Get-Content $PackageJsonPath -Raw -ErrorAction Stop | ConvertFrom-Json).overrides.axios
 		if ($existing -eq $SafeVersion) {
 			Write-Host "    [i] overrides.axios already set to $SafeVersion in $PackageJsonPath" -ForegroundColor Green
 			return
 		}
-	} catch {}
+	} catch {
+		Write-Warning "Set-AxiosOverride: could not read existing overrides from $PackageJsonPath — $_"
+	}
 
 	# Prefer jq: JSON-native tool that preserves arrays, formatting, and all field types
 	if (Get-Command jq -ErrorAction SilentlyContinue) {
+		$tmp = "$PackageJsonPath.tmp"
 		try {
-			$tmp = "$PackageJsonPath.tmp"
-			& jq --arg v $SafeVersion '.overrides.axios = $v' $PackageJsonPath | Set-Content $tmp -Encoding UTF8
-			Move-Item $tmp $PackageJsonPath -Force
+			& jq --arg v $SafeVersion '.overrides.axios = $v' $PackageJsonPath | Set-Content $tmp -Encoding UTF8 -ErrorAction Stop
+			Move-Item $tmp $PackageJsonPath -Force -ErrorAction Stop
 			Write-Host "    [+] Injected overrides.axios = `"$SafeVersion`" into $PackageJsonPath" -ForegroundColor Green
 			return
 		} catch {
-			Remove-Item "$PackageJsonPath.tmp" -ErrorAction SilentlyContinue
+			Write-Host "    [!] Failed to inject overrides into $PackageJsonPath : $_" -ForegroundColor Red
+			Write-Host "        Add manually: `"overrides`": { `"axios`": `"$SafeVersion`" }" -ForegroundColor Yellow
+		} finally {
+			Remove-Item $tmp -ErrorAction SilentlyContinue
 		}
 	}
 
-	# Fallback: PowerShell round-trip. Note: single-element arrays in package.json
-	# (e.g. "keywords": ["foo"]) may be flattened to scalars by ConvertTo-Json.
-	# Install jq to avoid this. https://jqlang.org/download/
-	try {
-		$pkg = Get-Content $PackageJsonPath -Raw | ConvertFrom-Json
-		if ($null -eq $pkg.overrides) {
-			$pkg | Add-Member -MemberType NoteProperty -Name overrides -Value ([PSCustomObject]@{}) -Force
-		}
-		$pkg.overrides | Add-Member -MemberType NoteProperty -Name axios -Value $SafeVersion -Force
-		$pkg | ConvertTo-Json -Depth 10 | Set-Content $PackageJsonPath -Encoding UTF8
-		Write-Host "    [+] Injected overrides.axios = `"$SafeVersion`" into $PackageJsonPath" -ForegroundColor Green
-	} catch {
-		Write-Host "    [!] Could not auto-inject overrides — add manually to $PackageJsonPath :" -ForegroundColor Yellow
-		Write-Host "        `"overrides`": { `"axios`": `"$SafeVersion`" }" -ForegroundColor Yellow
-	}
+	# Fallback: jq not available. Refuse to use PowerShell round-trip because
+	# ConvertTo-Json corrupts single-element arrays (e.g. "keywords": ["foo"] becomes
+	# "keywords": "foo") and re-orders keys alphabetically on PS 5.x.
+	# Install jq to enable auto-injection. https://jqlang.org/download/
+	Write-Host "    [!] jq not found — skipping auto-injection to avoid corrupting package.json." -ForegroundColor Yellow
+	Write-Host "        Install jq: winget install --id=jqlang.jq -e" -ForegroundColor Yellow
+	Write-Host "        Then add manually to ${PackageJsonPath}:" -ForegroundColor Yellow
+	Write-Host "            `"overrides`": { `"axios`": `"$SafeVersion`" }" -ForegroundColor Yellow
 }
 
 # ─── Preflight: dependency check ──────────────────────────────────────────────
@@ -182,9 +186,8 @@ function Write-Preflight {
 	if (Get-Command jq -ErrorAction SilentlyContinue) {
 		Write-Host "    jq      + found — overrides injection will preserve package.json exactly" -ForegroundColor Green
 	} else {
-		Write-Host "    jq      x missing — overrides injection will use PowerShell fallback" -ForegroundColor Yellow
-		Write-Host "             WARNING: single-element arrays in package.json may be corrupted" -ForegroundColor Red
-		Write-Host "             Install jq to avoid this: https://jqlang.org/download/" -ForegroundColor Yellow
+		Write-Host "    jq      x missing — auto-injection disabled to avoid corrupting package.json" -ForegroundColor Yellow
+		Write-Host "             Install jq to enable auto-injection: https://jqlang.org/download/" -ForegroundColor Yellow
 	}
 
 	$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
@@ -213,6 +216,8 @@ if ($activeConns) {
 	Write-Host "    [OK] No active connection to C2 address." -ForegroundColor Green
 }
 Write-Host ""
+
+# Note: /tmp/ld.py artifact check is Linux-specific and is not applicable on Windows.
 
 # ─── 2. Scan Node.js projects ─────────────────────────────────────────────────
 
