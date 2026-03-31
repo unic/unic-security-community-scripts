@@ -30,7 +30,7 @@ Because the token bypassed GitHub entirely, no CI/CD pipelines, branch protectio
 
 ```bash
 # Check if an affected axios version is installed
-npm list axios 2>/dev/null | grep -E "1\.14\.1|0\.30\.4"
+npm list axios 2>/dev/null | grep -E "axios@(1\.14\.1|0\.30\.4)$"
 
 # Check for the malicious dependency
 ls node_modules/plain-crypto-js 2>/dev/null && echo "POTENTIALLY AFFECTED"
@@ -41,7 +41,7 @@ ls -la /tmp/ld.py 2>/dev/null && echo "COMPROMISED"
 
 ## Automated scanning
 
-This repo contains two scanner scripts that walk every Node.js project under `$HOME`, check for affected versions, and apply mitigations automatically.
+This repo contains two scanner scripts that walk every Node.js project under `$HOME`, check for affected versions, auto-inject `overrides.axios`, and print step-by-step remediation instructions.
 
 ### macOS / Linux
 
