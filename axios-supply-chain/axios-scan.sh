@@ -139,7 +139,7 @@ if ! command -v pnpm &>/dev/null && ! command -v yarn &>/dev/null && ! command -
 fi
 
 if command -v jq &>/dev/null; then
-	echo -e "    ${GREEN}jq      ✓ found — overrides injection will preserve package.json exactly${RESET}"
+	echo -e "    ${GREEN}jq      ✓ found — overrides injection will preserve JSON types and array structure (formatting may change)${RESET}"
 else
 	echo -e "    ${YELLOW}jq      ✗ missing — overrides injection disabled; mitigation steps will be printed instead${RESET}"
 	echo -e "             (install jq: https://jqlang.org/download/)"
@@ -221,17 +221,17 @@ for pkg_file in "${PACKAGE_FILES[@]}"; do
 			pnpm)
 				installed_version=$(
 					cd "${project_dir}" &&
-					pnpm list axios 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true
+					pnpm list axios 2>/dev/null | grep -oE 'axios@[0-9]+\.[0-9]+\.[0-9]+' | sed 's/axios@//' | head -1 || true
 				) ;;
 			yarn)
 				installed_version=$(
 					cd "${project_dir}" &&
-					yarn list --pattern axios 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true
+					yarn list --pattern axios 2>/dev/null | grep -oE 'axios@[0-9]+\.[0-9]+\.[0-9]+' | sed 's/axios@//' | head -1 || true
 				) ;;
 			*)
 				installed_version=$(
 					cd "${project_dir}" &&
-					npm list axios 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true
+					npm list axios 2>/dev/null | grep -oE 'axios@[0-9]+\.[0-9]+\.[0-9]+' | sed 's/axios@//' | head -1 || true
 				) ;;
 		esac
 	fi
@@ -286,7 +286,8 @@ for pkg_file in "${PACKAGE_FILES[@]}"; do
 		[[ "${declared_version}" == 0.* ]] && affected_branch="0.x" || affected_branch="1.x"
 	fi
 
-	if [[ "${project_flagged}" -eq 1 || "${rat_present}" -eq 1 ]]; then
+	# Axios-specific mitigation (only when axios affected version detected)
+	if [[ "${project_flagged}" -eq 1 ]]; then
 		local_safe=$( [[ "${affected_branch}" == "0.x" ]] && echo "0.30.3" || echo "1.14.0" )
 		echo -e "  Project         : ${pkg_file}"
 		echo ""
@@ -305,6 +306,21 @@ for pkg_file in "${PACKAGE_FILES[@]}"; do
 		esac
 		echo ""
 		inject_overrides "${pkg_file}" "${affected_branch}"
+		echo ""
+	fi
+
+	# RAT-only mitigation (plain-crypto-js present but no affected axios version detected)
+	if [[ "${rat_present}" -eq 1 && "${project_flagged}" -eq 0 ]]; then
+		echo -e "  Project         : ${pkg_file}"
+		echo ""
+		echo -e "  ${YELLOW}Mitigation (RAT dropper found, no affected axios version detected):${RESET}"
+		echo -e "  1. cd \"${project_dir}\""
+		echo -e "  2. rm -rf node_modules/plain-crypto-js"
+		case "${pkg_manager}" in
+			pnpm) echo -e "  3. pnpm install --ignore-scripts" ;;
+			yarn) echo -e "  3. yarn install --ignore-scripts" ;;
+			*)    echo -e "  3. npm install --ignore-scripts    # reinstall without running postinstall hooks" ;;
+		esac
 		echo ""
 	fi
 done
