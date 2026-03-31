@@ -117,8 +117,8 @@ function Invoke-PmList {
 			"yarn" { & yarn --cwd $ProjectDir list --pattern axios 2>&1 }
 			default { & npm list axios --prefix $ProjectDir 2>&1 }
 		}
-		$match = $output | Select-String -Pattern '(\d+\.\d+\.\d+)' | Select-Object -First 1
-		if ($match -match '(\d+\.\d+\.\d+)') { return $Matches[1] }
+		$match = $output | Select-String -Pattern 'axios@(\d+\.\d+\.\d+)' | Select-Object -First 1
+		if ($match -match 'axios@(\d+\.\d+\.\d+)') { return $Matches[1] }
 	} catch {
 		Write-Warning "Invoke-PmList: $PackageManager failed in $ProjectDir — $_"
 		return $null
@@ -139,11 +139,14 @@ function Set-AxiosOverride {
 		Write-Warning "Set-AxiosOverride: could not read existing overrides from $PackageJsonPath — $_"
 	}
 
-	# Prefer jq: JSON-native tool that preserves arrays, formatting, and all field types
+	# Prefer jq: JSON-native tool that preserves JSON types and array structure
+	# (unlike PowerShell's ConvertTo-Json, which flattens single-element arrays)
 	if (Get-Command jq -ErrorAction SilentlyContinue) {
 		$tmp = "$PackageJsonPath.tmp"
 		try {
-			& jq --arg v $SafeVersion '.overrides.axios = $v' $PackageJsonPath | Set-Content $tmp -Encoding UTF8 -ErrorAction Stop
+			$jqOutput = & jq --arg v $SafeVersion '.overrides.axios = $v' $PackageJsonPath 2>&1
+			if ($LASTEXITCODE -ne 0) { throw "jq failed: $jqOutput" }
+			[System.IO.File]::WriteAllLines($tmp, $jqOutput, [System.Text.UTF8Encoding]::new($false))
 			Move-Item $tmp $PackageJsonPath -Force -ErrorAction Stop
 			Write-Host "    [+] Injected overrides.axios = `"$SafeVersion`" into $PackageJsonPath" -ForegroundColor Green
 			return
@@ -184,7 +187,7 @@ function Write-Preflight {
 	}
 
 	if (Get-Command jq -ErrorAction SilentlyContinue) {
-		Write-Host "    jq      + found — overrides injection will preserve package.json exactly" -ForegroundColor Green
+		Write-Host "    jq      + found — overrides injection will preserve JSON types and array structure (formatting may change)" -ForegroundColor Green
 	} else {
 		Write-Host "    jq      x missing — auto-injection disabled to avoid corrupting package.json" -ForegroundColor Yellow
 		Write-Host "             Install jq to enable auto-injection: https://jqlang.org/download/" -ForegroundColor Yellow
@@ -275,7 +278,8 @@ foreach ($pkgFile in $packageFiles) {
 		$safeVersion = if ($declaredVersion -like "0.*") { "0.30.3" } else { "1.14.0" }
 	}
 
-	if ($projectFlagged -or $ratPresent) {
+	# Axios-specific mitigation (only when affected axios version detected)
+	if ($projectFlagged) {
 		Write-Host "  Project file    : $($pkgFile.FullName)" -ForegroundColor White
 		Write-Host ""
 		Write-Host "  Mitigation steps ($pm project):" -ForegroundColor Yellow
@@ -293,6 +297,21 @@ foreach ($pkgFile in $packageFiles) {
 		}
 		Write-Host ""
 		Set-AxiosOverride -PackageJsonPath $pkgFile.FullName -SafeVersion $safeVersion
+		Write-Host ""
+	}
+
+	# RAT-only mitigation (plain-crypto-js present but no axios version affected)
+	if ($ratPresent -and -not $projectFlagged) {
+		Write-Host "  Project file    : $($pkgFile.FullName)" -ForegroundColor White
+		Write-Host ""
+		Write-Host "  Mitigation (RAT dropper found, no affected axios version detected):" -ForegroundColor Yellow
+		Write-Host "  1. cd `"$projectDir`""
+		Write-Host "  2. Remove-Item -Recurse -Force `"$ratPkgPath`""
+		switch ($pm) {
+			"pnpm" { Write-Host "  3. pnpm install --ignore-scripts" }
+			"yarn" { Write-Host "  3. yarn install --ignore-scripts" }
+			default { Write-Host "  3. npm install --ignore-scripts" }
+		}
 		Write-Host ""
 	}
 }
